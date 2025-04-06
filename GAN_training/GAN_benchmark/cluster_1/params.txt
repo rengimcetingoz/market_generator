@@ -1,0 +1,1 @@
+{"log_returns": false, "window": 63, "block_size": 2, "latent_dim": 3, "disc_lambda_layer": false, "batch_size": 128, "n_batches": 25000, "additional_d_steps": 0, "lr_d": 5e-05, "lr_g": 5e-06, "store_stats": true, "store_freq": 250, "asset": "Cluster_1"}
