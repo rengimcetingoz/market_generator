@@ -1,0 +1,203 @@
+from math import inf
+
+def best_long_short_trades(prices, k, fee=0.0):
+    """
+    Maximize profit with at most k completed transactions (round trips),
+    allowing both long and short positions and same-day reversals.
+
+    Parameters
+    ----------
+    prices : list[float]
+        Price series p[0..n-1].
+    k : int
+        Max number of completed transactions (each entry->exit is one).
+    fee : float, optional
+        Per-completion transaction fee/slippage applied when you close a position
+        (long close subtracts fee, short close subtracts fee). Default 0.0.
+
+    Returns
+    -------
+    profit : float
+        Maximum achievable profit with ≤ k transactions, closing out by the end.
+    trades : list[dict]
+        List of trades with fields:
+          - 'dir': 'LONG' or 'SHORT'
+          - 'entry': entry index
+          - 'exit': exit index
+          - 'p_entry': entry price
+          - 'p_exit' : exit price
+          - 'pnl' : realized PnL for the trade (after fee)
+    """
+    n = len(prices)
+    if n == 0 or k <= 0:
+        return 0.0, []
+
+    # States: 0=flat, 1=long, 2=short
+    # dp[i][t][s] = max profit up to day i with t completed transactions and state s
+    dp = [[[-inf]*3 for _ in range(k+1)] for __ in range(n)]
+    prev = [[[(None, None, None)]*3 for _ in range(k+1)] for __ in range(n)]  # backpointers: (i-1, t', s')
+
+    p = prices
+
+    # Day 0 initialization
+    for t in range(k+1):
+        dp[0][t][0] = 0.0  # flat, no profit
+    # Open long or short on day 0 (no transaction counted yet until you close)
+    dp[0][0][1] = -p[0]
+    prev[0][0][1] = (0, 0, 0)
+    dp[0][0][2] = +p[0]
+    prev[0][0][2] = (0, 0, 0)
+
+    for i in range(1, n):
+        for t in range(k+1):
+            # --- FLAT ---
+            # stay flat
+            if dp[i-1][t][0] > dp[i][t][0]:
+                dp[i][t][0] = dp[i-1][t][0]
+                prev[i][t][0] = (i-1, t, 0)
+
+            # close LONG to flat (consumes a transaction if allowed)
+            if t > 0 and dp[i-1][t-1][1] + p[i] - fee > dp[i][t][0]:
+                dp[i][t][0] = dp[i-1][t-1][1] + p[i] - fee
+                prev[i][t][0] = (i-1, t-1, 1)
+
+            # close SHORT to flat (consumes a transaction if allowed)
+            if t > 0 and dp[i-1][t-1][2] - p[i] - fee > dp[i][t][0]:
+                dp[i][t][0] = dp[i-1][t-1][2] - p[i] - fee
+                prev[i][t][0] = (i-1, t-1, 2)
+
+            # --- LONG ---
+            # stay long
+            if dp[i-1][t][1] > dp[i][t][1]:
+                dp[i][t][1] = dp[i-1][t][1]
+                prev[i][t][1] = (i-1, t, 1)
+
+            # open long from flat
+            if dp[i-1][t][0] - p[i] > dp[i][t][1]:
+                dp[i][t][1] = dp[i-1][t][0] - p[i]
+                prev[i][t][1] = (i-1, t, 0)
+
+            # reverse SHORT -> LONG on same day:
+            # close short (consumes one transaction) and open long immediately
+            if t > 0 and dp[i-1][t-1][2] - p[i] - fee - p[i] > dp[i][t][1]:
+                dp[i][t][1] = dp[i-1][t-1][2] - p[i] - fee - p[i]
+                prev[i][t][1] = (i-1, t-1, 2)
+
+            # --- SHORT ---
+            # stay short
+            if dp[i-1][t][2] > dp[i][t][2]:
+                dp[i][t][2] = dp[i-1][t][2]
+                prev[i][t][2] = (i-1, t, 2)
+
+            # open short from flat
+            if dp[i-1][t][0] + p[i] > dp[i][t][2]:
+                dp[i][t][2] = dp[i-1][t][0] + p[i]
+                prev[i][t][2] = (i-1, t, 0)
+
+            # reverse LONG -> SHORT on same day:
+            if t > 0 and dp[i-1][t-1][1] + p[i] - fee + p[i] > dp[i][t][2]:
+                dp[i][t][2] = dp[i-1][t-1][1] + p[i] - fee + p[i]
+                prev[i][t][2] = (i-1, t-1, 1)
+
+    # Force flatten at the end (close anything open if within k)
+    best_profit = -inf
+    best_t = 0
+    end_state = 0
+    i = n-1
+    for t in range(k+1):
+        # Already flat:
+        if dp[i][t][0] > best_profit:
+            best_profit = dp[i][t][0]
+            best_t = t
+            end_state = 0
+        # If holding long and we still can close within k:
+        if t+1 <= k and dp[i][t][1] + p[i] - fee > best_profit:
+            best_profit = dp[i][t][1] + p[i] - fee
+            best_t = t+1
+            end_state = 0
+            # Patch a virtual close pointer for reconstruction
+            prev[i][t+1][0] = (i, t, 1)
+        # If holding short:
+        if t+1 <= k and dp[i][t][2] - p[i] - fee > best_profit:
+            best_profit = dp[i][t][2] - p[i] - fee
+            best_t = t+1
+            end_state = 0
+            prev[i][t+1][0] = (i, t, 2)
+
+    # Reconstruct path of states
+    path = []
+    cur = (n-1, best_t, end_state)
+    while cur is not None:
+        i, t, s = cur
+        path.append(cur)
+        prev_ptr = prev[i][t][s]
+        if prev_ptr == (None, None, None):
+            break
+        cur = prev_ptr
+        if cur == (i, t, s):  # safety
+            break
+        if i == 0 and prev_ptr == (0, 0, 0):
+            path.append((0, 0, 0))
+            break
+
+    path.reverse()
+
+    # Extract trades (entry/exit indices & PnL)
+    trades = []
+    pos = 'FLAT'
+    entry_idx = None
+    for (i0, t0, s0), (i1, t1, s1) in zip(path, path[1:]):
+        # interpret state s1 at index i1 (since dp is "at day i1")
+        if pos == 'FLAT':
+            if s1 == 1:
+                pos = 'LONG'; entry_idx = i1
+            elif s1 == 2:
+                pos = 'SHORT'; entry_idx = i1
+        elif pos == 'LONG':
+            # if we become flat, we closed a long
+            if s1 == 0 and entry_idx is not None:
+                pnl = prices[i1] - prices[entry_idx] - fee
+                trades.append({
+                    'dir': 'LONG',
+                    'entry': entry_idx, 'exit': i1,
+                    'p_entry': prices[entry_idx], 'p_exit': prices[i1],
+                    'pnl': pnl
+                })
+                pos = 'FLAT'; entry_idx = None
+            # if we switch to short, treat as close long then open short at same index
+            if s1 == 2:
+                if entry_idx is not None:
+                    pnl = prices[i1] - prices[entry_idx] - fee
+                    trades.append({
+                        'dir': 'LONG',
+                        'entry': entry_idx, 'exit': i1,
+                        'p_entry': prices[entry_idx], 'p_exit': prices[i1],
+                        'pnl': pnl
+                    })
+                pos = 'SHORT'; entry_idx = i1
+        elif pos == 'SHORT':
+            if s1 == 0 and entry_idx is not None:
+                pnl = prices[entry_idx] - prices[i1] - fee
+                trades.append({
+                    'dir': 'SHORT',
+                    'entry': entry_idx, 'exit': i1,
+                    'p_entry': prices[entry_idx], 'p_exit': prices[i1],
+                    'pnl': pnl
+                })
+                pos = 'FLAT'; entry_idx = None
+            if s1 == 1:
+                if entry_idx is not None:
+                    pnl = prices[entry_idx] - prices[i1] - fee
+                    trades.append({
+                        'dir': 'SHORT',
+                        'entry': entry_idx, 'exit': i1,
+                        'p_entry': prices[entry_idx], 'p_exit': prices[i1],
+                        'pnl': pnl
+                    })
+                pos = 'LONG'; entry_idx = i1
+
+    # Safety: ensure ≤ k trades
+    if len(trades) > k:
+        trades = trades[:k]
+
+    return float(best_profit), trades
