@@ -1,180 +1,134 @@
-def best_long_short_trades_roundtrip(prices, k, fee=0.0):
+from math import inf
+
+def best_k_round_trips(prices, k):
     """
-    Maximize profit with at most k completed round trips (transactions).
-    Long & short allowed. Closing a position increments the count.
-    Same-day reversals consume 1 transaction (the close), then open opposite side.
-    Returns: (profit, trades[list of dicts])
+    Maximize profit with at most k transactions (1 transaction = buy then sell).
+    Returns (max_profit, trades) where trades is a list of (buy_idx, sell_idx).
+    
+    Assumptions:
+      - prices is a list/array of length n >= 0
+      - you cannot hold multiple positions at once
+      - you must buy before you sell
+      - no shorting
     """
-    from math import inf
     n = len(prices)
-    if n == 0 or k <= 0:
-        return 0.0, []
-    p = prices
+    if k <= 0 or n <= 1:
+        return 0, []
 
-    # DP for day i: flat[t], hold_long[t], hold_short[t] for t completed round trips so far
-    flat = [-float('inf')] * (k + 1)
-    hold_long = [-float('inf')] * (k + 1)
-    hold_short = [-float('inf')] * (k + 1)
+    # If k is large, it's equivalent to unlimited transactions: take every up-move.
+    if k >= n // 2:
+        trades = []
+        i = 0
+        while i < n-1:
+            # find next local valley to buy
+            while i < n-1 and prices[i+1] <= prices[i]:
+                i += 1
+            buy = i
+            # find next local peak to sell
+            while i < n-1 and prices[i+1] >= prices[i]:
+                i += 1
+            sell = i
+            if sell > buy:
+                trades.append((buy, sell))
+            i += 1
+        profit = sum(prices[s] - prices[b] for b, s in trades)
+        # Trim to at most k best segments if needed (rare when k >= n//2, but keep safe)
+        if len(trades) > k:
+            # Keep the k highest-profit segments
+            trades.sort(key=lambda bs: prices[bs[1]] - prices[bs[0]], reverse=True)
+            trades = trades[:k]
+        profit = sum(prices[s] - prices[b] for b, s in trades)
+        trades.sort()  # chronological
+        return profit, trades
 
-    # backpointers: prev[i][t]['F'/'L'/'S'] = (prev_i, prev_t, prev_state, action)
-    prev = [[{'F': None, 'L': None, 'S': None} for _ in range(k+1)] for __ in range(n)]
+    # DP for general k: 
+    # hold[t][i]: max profit at day i holding a stock after completing t sells
+    # cash[t][i]: max profit at day i holding cash after completing t sells
+    # We’ll also keep booleans to reconstruct buy/sell decisions.
+    hold = [[-inf]*n for _ in range(k+1)]
+    cash = [[-inf]*n for _ in range(k+1)]
+    buy_taken  = [[False]*n for _ in range(k+1)]   # we bought at i to get hold[t][i]
+    sell_taken = [[False]*n for _ in range(k+1)]   # we sold at i to get cash[t][i]
 
-    # Day 0 init
-    flat[0] = 0.0
-    prev[0][0]['F'] = (None, None, None, None)
-    hold_long[0] = flat[0] - p[0]; prev[0][0]['L'] = (0, 0, 'F', 'open_long')
-    hold_short[0] = flat[0] + p[0]; prev[0][0]['S'] = (0, 0, 'F', 'open_short')
+    # Day 0 initialization
+    hold[0][0] = -prices[0]
+    cash[0][0] = 0
+    for t in range(1, k+1):
+        hold[t][0] = -inf
+        cash[t][0] = -inf
 
+    # Fill DP
     for i in range(1, n):
-        new_flat, new_long, new_short = flat[:], hold_long[:], hold_short[:]
+        # t = 0 (no sells completed yet) separately
+        # hold[0][i] = max(hold[0][i-1], cash[0][i-1] - prices[i])
+        if hold[0][i-1] >= cash[0][i-1] - prices[i]:
+            hold[0][i] = hold[0][i-1]
+        else:
+            hold[0][i] = cash[0][i-1] - prices[i]
+            buy_taken[0][i] = True
+        # cash[0][i] = cash[0][i-1] (can't sell without prior sells)
+        cash[0][i] = cash[0][i-1]
 
-        # stay flat
-        for t in range(k+1):
-            if flat[t] > new_flat[t]:
-                new_flat[t] = flat[t]; prev[i][t]['F'] = (i-1, t, 'F', 'stay_flat')
-
-        # close long/short -> flat (consumes 1 transaction)
+        # t >= 1
         for t in range(1, k+1):
-            cand = hold_long[t-1] + p[i] - fee
-            if cand > new_flat[t]:
-                new_flat[t] = cand; prev[i][t]['F'] = (i-1, t-1, 'L', 'close_long')
-            cand = hold_short[t-1] - p[i] - fee
-            if cand > new_flat[t]:
-                new_flat[t] = cand; prev[i][t]['F'] = (i-1, t-1, 'S', 'close_short')
+            # hold[t][i] = max(hold[t][i-1], cash[t][i-1] - prices[i])
+            if hold[t][i-1] >= cash[t][i-1] - prices[i]:
+                hold[t][i] = hold[t][i-1]
+            else:
+                hold[t][i] = cash[t][i-1] - prices[i]
+                buy_taken[t][i] = True
 
-        # stay long / open long from flat
-        for t in range(k+1):
-            if hold_long[t] > new_long[t]:
-                new_long[t] = hold_long[t]; prev[i][t]['L'] = (i-1, t, 'L', 'hold_long')
-            cand = flat[t] - p[i]
-            if cand > new_long[t]:
-                new_long[t] = cand; prev[i][t]['L'] = (i-1, t, 'F', 'open_long')
+            # cash[t][i] = max(cash[t][i-1], hold[t-1][i-1] + prices[i])
+            if cash[t][i-1] >= hold[t-1][i-1] + prices[i]:
+                cash[t][i] = cash[t][i-1]
+            else:
+                cash[t][i] = hold[t-1][i-1] + prices[i]
+                sell_taken[t][i] = True
 
-        # reverse short->long (close counts 1, then open long)
-        for t in range(1, k+1):
-            cand = hold_short[t-1] - fee - 2*p[i]
-            if cand > new_long[t]:
-                new_long[t] = cand; prev[i][t]['L'] = (i-1, t-1, 'S', 'reverse_to_long')
+    # Best profit is with <= k sells; typically cash[k][n-1]
+    best_t = max(range(k+1), key=lambda t: cash[t][n-1])
+    max_profit = cash[best_t][n-1]
 
-        # stay short / open short from flat
-        for t in range(k+1):
-            if hold_short[t] > new_short[t]:
-                new_short[t] = hold_short[t]; prev[i][t]['S'] = (i-1, t, 'S', 'hold_short')
-            cand = flat[t] + p[i]
-            if cand > new_short[t]:
-                new_short[t] = cand; prev[i][t]['S'] = (i-1, t, 'F', 'open_short')
+    # Reconstruct trades by backtracking
+    trades = []
+    i = n - 1
+    t = best_t
+    state = 'cash'  # start from cash[t][n-1]
 
-        # reverse long->short
-        for t in range(1, k+1):
-            cand = hold_long[t-1] - fee + 2*p[i]
-            if cand > new_short[t]:
-                new_short[t] = cand; prev[i][t]['S'] = (i-1, t-1, 'L', 'reverse_to_short')
+    while i >= 0 and t >= 0:
+        if state == 'cash':
+            # If staying put yields same value, move left
+            if i > 0 and cash[t][i] == cash[t][i-1]:
+                i -= 1
+            # If we sold here to reach cash[t][i], record sell and move to hold[t-1][i-1]
+            elif t > 0 and sell_taken[t][i]:
+                sell_i = i
+                i -= 1
+                t -= 1
+                state = 'hold'
+            else:
+                i -= 1
+        else:  # state == 'hold' at (t, i)
+            # If we were already holding from previous day
+            if i > 0 and hold[t][i] == hold[t][i-1]:
+                i -= 1
+            # If we bought here to reach hold[t][i], pair with last sell
+            elif buy_taken[t][i]:
+                buy_i = i
+                trades.append((buy_i, sell_i))
+                i -= 1
+                state = 'cash'  # after pairing buy with previous sell, continue in cash[t][...]
+            else:
+                i -= 1
 
-        flat, hold_long, hold_short = new_flat, new_long, new_short
+    trades.reverse()
+    return max_profit, trades
 
-    # force-flat at end if capacity remains
-    best_profit, end_t, end_state, i = -float('inf'), 0, 'F', n-1
-    for t in range(k+1):
-        if flat[t] > best_profit: best_profit, end_t, end_state = flat[t], t, 'F'
-    for t in range(k):
-        cand = hold_long[t] + p[-1] - fee
-        if cand > best_profit:
-            best_profit, end_t, end_state = cand, t+1, 'F'
-            prev[i][t+1]['F'] = (i, t, 'L', 'force_close_long')
-        cand = hold_short[t] - p[-1] - fee
-        if cand > best_profit:
-            best_profit, end_t, end_state = cand, t+1, 'F'
-            prev[i][t+1]['F'] = (i, t, 'S', 'force_close_short')
 
-    # reconstruct path
-    path, cur, seen = [], (n-1, end_t, end_state), set()
-    while cur and cur not in seen:
-        seen.add(cur); path.append(cur)
-        ii, tt, ss = cur
-        bp = prev[ii][tt][ss]
-        if not bp or bp[0] is None: break
-        cur = (bp[0], bp[1], bp[2])
-    path.reverse()
-
-    # extract trades
-    trades, pos, entry_idx = [], 'F', None
-    def act(node):
-        ii, tt, ss = node
-        bp = prev[ii][tt][ss]
-        return None if not bp else bp[3]
-
-    for a, b in zip(path, path[1:]):
-        action = act(b); idx = b[0]
-        if action == 'open_long' and pos == 'F':
-            pos, entry_idx = 'L', idx
-        elif action in ('close_long','force_close_long') and pos == 'L' and entry_idx is not None:
-            trades.append({'dir':'LONG','entry':entry_idx,'exit':idx,
-                           'p_entry':p[entry_idx],'p_exit':p[idx],'pnl':p[idx]-p[entry_idx]-fee})
-            pos, entry_idx = 'F', None
-        elif action == 'open_short' and pos == 'F':
-            pos, entry_idx = 'S', idx
-        elif action in ('close_short','force_close_short') and pos == 'S' and entry_idx is not None:
-            trades.append({'dir':'SHORT','entry':entry_idx,'exit':idx,
-                           'p_entry':p[entry_idx],'p_exit':p[idx],'pnl':p[entry_idx]-p[idx]-fee})
-            pos, entry_idx = 'F', None
-        elif action == 'reverse_to_long':
-            if pos == 'S' and entry_idx is not None:
-                trades.append({'dir':'SHORT','entry':entry_idx,'exit':idx,
-                               'p_entry':p[entry_idx],'p_exit':p[idx],'pnl':p[entry_idx]-p[idx]-fee})
-            pos, entry_idx = 'L', idx
-        elif action == 'reverse_to_short':
-            if pos == 'L' and entry_idx is not None:
-                trades.append({'dir':'LONG','entry':entry_idx,'exit':idx,
-                               'p_entry':p[entry_idx],'p_exit':p[idx],'pnl':p[idx]-p[entry_idx]-fee})
-            pos, entry_idx = 'S', idx
-
-    if len(trades) > k:
-        trades = trades[:k]
-
-    return float(best_profit), trades
-
-def run_case(name, prices, k, fee=0.0):
-    profit, trades = best_long_short_trades_roundtrip(prices, k, fee)
-    df = pd.DataFrame(trades)
-    df['case'] = name; df['k'] = k; df['fee'] = fee
-    return profit, df
-
-cases, summaries = [], []
-
-prices1 = [100, 102, 99, 101, 98, 103]
-p1, df1 = run_case("example", prices1, k=2, fee=0.0)
-summaries.append(("example", prices1, 2, 0.0, p1)); cases.append(df1)
-
-prices2 = [10, 11, 12, 13, 14, 15]
-p2, df2 = run_case("up_only", prices2, k=3, fee=0.0)
-summaries.append(("up_only", prices2, 3, 0.0, p2)); cases.append(df2)
-
-prices3 = [15, 14, 13, 12, 11, 10]
-p3, df3 = run_case("down_only", prices3, k=3, fee=0.0)
-summaries.append(("down_only", prices3, 3, 0.0, p3)); cases.append(df3)
-
-prices4 = [10, 12, 9, 13, 8, 14, 7, 15]
-p4, df4 = run_case("choppy", prices4, k=3, fee=0.0)
-summaries.append(("choppy", prices4, 3, 0.0, p4)); cases.append(df4)
-
-p5, df5 = run_case("choppy_with_fee", prices4, k=3, fee=0.5)
-summaries.append(("choppy_with_fee", prices4, 3, 0.5, p5)); cases.append(df5)
-
-all_trades_df = pd.concat([df for df in cases if not df.empty], ignore_index=True) if any([not df.empty for df in cases]) else pd.DataFrame()
-if not all_trades_df.empty:
-    display_dataframe_to_user("Best trades (1 round trip = 1 transaction)", all_trades_df)
-
-summary_df = pd.DataFrame(summaries, columns=["case","prices","k","fee","max_profit"])
-display_dataframe_to_user("Summary: max profit with k round trips", summary_df)
-
-print("Quick summary (k counts round-trips):")
-for row in summaries:
-    case, prices, k, fee, mp = row
-    print(f"- {case}: k={k}, fee={fee}, max_profit={mp:.4f}, prices={prices}")
-
-All set. I updated the logic so **k** counts *completed round trips* only, and verified with tests. You’ll see two tables in the workspace:
-
-- **Best trades (1 round trip = 1 transaction)** — reconstructed trades with indices, prices, and PnL.  
-- **Summary: max profit with k round trips** — profit per scenario.
-
-If you paste a concrete price vector + your `k` and `fee`, I’ll run it and return the exact trade indices right away. |oai:code-citation|
+# ---- Example ----
+if __name__ == "__main__":
+    prices = [3, 2, 6, 5, 0, 3]
+    k = 2
+    profit, trades = best_k_round_trips(prices, k)
+    print("Max profit:", profit)          # -> 7
+    print("Trades (buy, sell):", trades)  # -> [(1, 2), (4, 5)] or equivalent optimal
